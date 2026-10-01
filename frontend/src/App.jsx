@@ -7,12 +7,15 @@ import PowerSummary from './components/PowerSummary.jsx'
 import BandChart from './components/BandChart.jsx'
 import SpectrumChart from './components/SpectrumChart.jsx'
 import MaskPreview from './components/MaskPreview.jsx'
+import TimeScopePanel from './components/TimeScopePanel.jsx'
+import SavedPlansPanel from './components/SavedPlansPanel.jsx'
+import { browserTzOffset, instantIso, validateSchedule } from './time.js'
 
 const EMPTY_RULES = { guard_required_mhz: 1.0, leakage_limit_dbm: -45.0, reuse_policy: {} }
 
 const newCarrier = (i) => ({
   name: `C${i + 1}`, center_mhz: 100 + i * 6, bandwidth_mhz: 4,
-  power_dbm: 20, polarization: 'H', mask_name: 'strict',
+  power_dbm: 20, polarization: 'H', mask_name: 'strict', schedule: [],
 })
 
 export default function App() {
@@ -23,14 +26,21 @@ export default function App() {
   const [scenarios, setScenarios] = useState([])
   const [scenarioId, setScenarioId] = useState(null)
   const [scenarioName, setScenarioName] = useState('未命名场景')
+  const [scenarioRevision, setScenarioRevision] = useState(0)
   const [analysis, setAnalysis] = useState(null)
   const [plan, setPlan] = useState(null)
   const [planMode, setPlanMode] = useState('guard_only')
   const [planView, setPlanView] = useState(false)
+  const [plansRefresh, setPlansRefresh] = useState(0)
   const [tab, setTab] = useState('spectrum')
   const [selectedPair, setSelectedPair] = useState(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+
+  // 时间口径：anytime=全天；instant=只看某时刻实际激活的载波
+  const [timeScope, setTimeScope] = useState('anytime')
+  const tz0 = useMemo(() => browserTzOffset(), [])
+  const [atIso, setAtIso] = useState(() => instantIso(browserTzOffset(), 12, 0))
 
   useEffect(() => {
     api.masks().then(setMasks).catch((e) => setError(String(e)))
@@ -40,13 +50,23 @@ export default function App() {
   const refreshScenarios = () =>
     api.listScenarios().then(setScenarios).catch(() => {})
 
+  const atParam = () => (timeScope === 'instant' ? atIso : undefined)
+
+  const scheduleError = useMemo(() => {
+    for (const c of carriers) {
+      const e = validateSchedule(c.schedule || [])
+      if (e) return `${c.name}: ${e}`
+    }
+    return null
+  }, [carriers])
+
   const runAnalyze = useCallback(async () => {
     setBusy('analyze'); setError(''); setPlan(null)
     try {
       const res = await api.analyze({
         carriers,
         rules: { ...rules, reuse_policy: normalizePolicy(rules.reuse_policy) },
-        plot_grid_mhz: 0.05,
+        plot_grid_mhz: 0.05, ...(atParam() ? { at: atParam() } : {}),
       })
       setAnalysis(res)
       setTab('spectrum')
@@ -55,7 +75,7 @@ export default function App() {
     } finally {
       setBusy('')
     }
-  }, [carriers, rules])
+  }, [carriers, rules, timeScope, atIso])
 
   const runPlan = useCallback(async () => {
     setBusy('plan'); setError('')
@@ -64,6 +84,7 @@ export default function App() {
         carriers,
         rules: { ...rules, reuse_policy: normalizePolicy(rules.reuse_policy) },
         band_low_mhz: band.low, band_high_mhz: band.high, mode: planMode,
+        ...(atParam() ? { at: atParam() } : {}),
       })
       setPlan(res)
       setPlanView(false) // 默认显示原始（冲突）谱；可切换到规划后
@@ -72,7 +93,21 @@ export default function App() {
     } finally {
       setBusy('')
     }
-  }, [carriers, rules, band, planMode])
+  }, [carriers, rules, band, planMode, timeScope, atIso])
+
+  const saveCurrentPlan = async () => {
+    if (scenarioId == null) { setError('请先保存场景，再保存规划（规划需绑定场景修订）。'); return }
+    setBusy('saveplan'); setError('')
+    try {
+      const saved = await api.savePlan({
+        scenario_id: scenarioId, mode: planMode,
+        band_low_mhz: band.low, band_high_mhz: band.high,
+        ...(atParam() ? { at: atParam() } : {}),
+      })
+      setPlansRefresh((k) => k + 1)
+      if (saved.stale) setError('保存的规划已过期，请重新求解。')
+    } catch (e) { setError(e.message) } finally { setBusy('') }
+  }
 
   const loadScenario = async (id) => {
     if (!id) { setScenarioId(null); return }
@@ -80,7 +115,13 @@ export default function App() {
     try {
       const sc = await api.getScenario(id)
       setScenarioId(sc.id); setScenarioName(sc.name)
-      setCarriers(sc.carriers.map(({ id, ...c }) => c))
+      setScenarioRevision(sc.revision || 1)
+      setCarriers(sc.carriers.map(({ id: _id, ...c }) => ({
+        ...c,
+        schedule: (c.schedule || []).map((w) => ({
+          start: w.start, end: w.end, tz_offset_minutes: w.tz_offset_minutes ?? 0,
+        })),
+      })))
       setRules({ guard_required_mhz: sc.guard_required_mhz,
                  leakage_limit_dbm: sc.leakage_limit_dbm, reuse_policy: sc.reuse_policy || {} })
       setBand({ low: sc.band_low_mhz, high: sc.band_high_mhz })
@@ -100,7 +141,9 @@ export default function App() {
         ? await api.updateScenario(scenarioId, payload)
         : await api.createScenario(payload)
       setScenarioId(saved.id)
+      setScenarioRevision(saved.revision || 1)
       await refreshScenarios()
+      setPlansRefresh((k) => k + 1)
     } catch (e) { setError(e.message) } finally { setBusy('') }
   }
 
@@ -109,13 +152,12 @@ export default function App() {
     setBusy('del'); setError('')
     try {
       await api.deleteScenario(scenarioId)
-      setScenarioId(null)
+      setScenarioId(null); setScenarioRevision(0)
       await refreshScenarios()
     } catch (e) { setError(e.message) } finally { setBusy('') }
   }
 
   const status = analysis?.status
-  // 频段图始终显示录入频带（按原始冲突着色），规划位置以绿色描边框叠加
   const shownBands = analysis?.bands
   const shownFindings = analysis?.findings || []
   const plannedSpectrum = plan?.feasible ? plan.spectrum : null
@@ -143,22 +185,40 @@ export default function App() {
         {/* 左列：录入与规则 */}
         <div>
           <div className="panel">
-            <h2>场景（PostgreSQL）</h2>
+            <h2>场景（数据库） rev {scenarioRevision || '—'}</h2>
             <div className="row">
               <select className="field" style={{ flex: 1 }}
                       value={scenarioId ?? ''} onChange={(e) => loadScenario(e.target.value ? Number(e.target.value) : null)}>
                 <option value="">— 未保存的编辑 —</option>
-                {scenarios.map((s) => <option key={s.id} value={s.id}>{s.name}（{s.carrier_count}）</option>)}
+                {scenarios.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}（{s.carrier_count} · rev {s.revision}）
+                  </option>
+                ))}
               </select>
             </div>
             <div className="row" style={{ marginTop: 8 }}>
               <input className="field" style={{ flex: 1 }} value={scenarioName}
                      onChange={(e) => setScenarioName(e.target.value)} placeholder="场景名" />
-              <button className="primary" onClick={saveScenario} disabled={!!busy}>
+              <button className="primary" onClick={saveScenario} disabled={!!busy || !!scheduleError}>
                 {scenarioId ? '更新' : '保存'}
               </button>
               {scenarioId && <button className="danger" onClick={deleteScenario} disabled={!!busy}>删除</button>}
             </div>
+            {scenarioId && scenarios.find((s) => s.id === scenarioId) && (
+              <div className="hint">
+                最近修订：{scenarios.find((s) => s.id === scenarioId).updated_at
+                  ?.replace('T', ' ').slice(0, 16) || '—'}；
+                内容实际变化（含改时间）才会递增修订号。
+              </div>
+            )}
+          </div>
+
+          <div className="panel">
+            <h2>时间口径（激活区间）</h2>
+            <TimeScopePanel scope={timeScope} setScope={setTimeScope}
+                            atIso={atIso} setAtIso={setAtIso} disabled={!!busy}
+                            context={analysis?.time_context} />
           </div>
 
           <div className="panel">
@@ -166,7 +226,7 @@ export default function App() {
             <CarrierTable carriers={carriers} masks={masks} onChange={setCarriers}
                           onAdd={() => setCarriers([...carriers, newCarrier(carriers.length)])}
                           onRemove={(i) => setCarriers(carriers.filter((_, j) => j !== i))}
-                          disabled={!!busy} />
+                          disabled={!!busy} defaultTz={tz0} />
           </div>
 
           <div className="panel">
@@ -176,12 +236,17 @@ export default function App() {
 
           <div className="panel">
             <div className="row">
-              <button className="primary" onClick={runAnalyze} disabled={!!busy || !carriers.length}>
+              <button className="primary" onClick={runAnalyze}
+                      disabled={!!busy || !carriers.length || !!scheduleError}>
                 {busy === 'analyze' ? '计算中…' : '▶ 检查冲突 / 绘制频段'}
               </button>
             </div>
+            {scheduleError && <div className="err-msg">区间非法：{scheduleError}</div>}
             {error && <div className="err-msg">{error}</div>}
-            <div className="hint">检查：频带重叠 · 保护带不足 · 掩模尾部越界（定向到载波对）；功率在线性域汇总。</div>
+            <div className="hint">
+              按{timeScope === 'instant' ? '该时刻实际激活' : '每日排程共同激活'}的载波检查：
+              频带重叠 · 保护带不足 · 掩模尾部越界（定向到载波对）；功率在线性域汇总。
+            </div>
           </div>
         </div>
 
@@ -217,7 +282,8 @@ export default function App() {
                 </div>
                 <SpectrumChart spectrum={shownSpectrum} bands={spectrumBands} />
                 <div className="plot-note">
-                  提示：点击上方频段条选择载波；点击下方冲突条目可高亮对应载波对。
+                  提示：点击上方频段条选择载波；💤 虚线灰条为此刻未激活载波，不计入发射谱与功率叠加；
+                  点击下方冲突条目可高亮对应载波对。
                 </div>
               </>
             )}
@@ -240,19 +306,35 @@ export default function App() {
                 <button className={planMode === 'mask_aware' ? 'on' : ''}
                         onClick={() => setPlanMode('mask_aware')}>掩模感知</button>
               </span>
-              <button className="primary" onClick={runPlan} disabled={!!busy || !carriers.length}>
+              <button className="primary" onClick={runPlan}
+                      disabled={!!busy || !carriers.length || !!scheduleError}>
                 {busy === 'plan' ? '求解中…' : '求解频率位置'}
+              </button>
+              <button onClick={saveCurrentPlan} disabled={!!busy || scenarioId == null || !!scheduleError}
+                      title="绑定当前场景修订与时间窗口保存">
+                {busy === 'saveplan' ? '保存中…' : '💾 保存规划'}
               </button>
             </div>
             <div className="hint">
-              目标：在 1 kHz 网格上最小化各载波相对录入位置的总偏移；掩模感知模式按双向尾部泄漏达标反算间隔（含 0.5 dB 裕量）。
+              {timeScope === 'instant'
+                ? `时刻口径 ${atIso}：仅约束此刻同时激活的载波对。`
+                : '全天口径：仅约束每日排程存在共同激活时刻的载波对；时间完全错开（含跨午夜、不同 UTC 偏移）的载波对可同频。'}
+              目标为在 1 kHz 网格上最小化总偏移；掩模感知按双向尾部泄漏达标反算间隔（含 0.5 dB 裕量）。
             </div>
             {plan && <PlanResult plan={plan} />}
           </div>
 
           <div className="panel">
+            <h2>已保存规划（绑定修订与时间窗口）</h2>
+            <SavedPlansPanel scenarioId={scenarioId} revision={scenarioRevision}
+                             refreshKey={plansRefresh} />
+          </div>
+
+          <div className="panel">
             <h2>冲突定位{planView ? '（规划后复核）' : ''}</h2>
             <FindingsList findings={shownFindingsList} selectedPair={selectedPair}
+                          timeSeparated={planView ? undefined : analysis?.time_separated_pairs}
+                          timeContext={planView ? plan?.post_check?.time_context : analysis?.time_context}
                           onSelect={(p) => setSelectedPair(
                             JSON.stringify(selectedPair) === JSON.stringify(p) ? null : p)} />
           </div>
@@ -284,7 +366,8 @@ function PlanResult({ plan }) {
         <span className="spacer" />
         {counts && (
           <span className="muted">
-            规划后复核：冲突 {counts.error} · 警告 {counts.warning} · 待评估 {counts.pending}
+            规划后复核（{plan.time_scope === 'instant' ? '时刻' : '全天'}口径）：
+            冲突 {counts.error} · 警告 {counts.warning} · 待评估 {counts.pending}
           </span>
         )}
         <button onClick={() => setOpen(!open)}>{open ? '收起' : '展开'}</button>
@@ -292,7 +375,7 @@ function PlanResult({ plan }) {
       {open && (
         <table className="plan-table" style={{ marginTop: 8 }}>
           <thead>
-            <tr><th>载波</th><th>原中心</th><th>新中心 MHz</th><th>频带范围</th><th>偏移 MHz</th></tr>
+            <tr><th>载波</th><th>原中心</th><th>新中心 MHz</th><th>频带范围</th><th>激活时段</th><th>偏移 MHz</th></tr>
           </thead>
           <tbody>
             {plan.assignments.map((a) => (
@@ -301,6 +384,7 @@ function PlanResult({ plan }) {
                 <td>{a.original_center_mhz.toFixed(3)}</td>
                 <td>{a.center_mhz.toFixed(3)}</td>
                 <td>{a.low_mhz.toFixed(2)}–{a.high_mhz.toFixed(2)}</td>
+                <td className="muted">{a.always_active ? '始终激活' : (a.schedule || []).length + ' 段'}</td>
                 <td className={a.shift_mhz > 0 ? 'shift-pos' : a.shift_mhz < 0 ? 'shift-neg' : ''}>
                   {a.shift_mhz > 0 ? '+' : ''}{a.shift_mhz.toFixed(3)}
                 </td>

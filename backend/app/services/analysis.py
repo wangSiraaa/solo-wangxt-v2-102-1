@@ -11,18 +11,27 @@
 - "allowed"   已知隔离度足够：重叠允许，不报几何/泄漏冲突
 - "unknown"   隔离度未知：几何重叠时只给“待评估”，不下违规定性
 
+时间口径（schedule，见 services/time_model.py）：
+- 每个载波带每日循环激活区间（本地挂钟 + UTC 偏移，可跨午夜）；
+  空列表 = 始终激活（旧数据升级的唯一默认语义）。
+- analyze 接收 at（aware datetime）时，只评估该时刻实际激活的载波；
+  at=None 为全天口径：只有在一天内存在共同激活时刻的载波对才参与冲突检查，
+  频率相同但时间完全不重叠的两载波不产生几何/泄漏冲突。
+
 功率汇总：线性域 (W) 求和后再换算 dBm 显示，见 units.py。
 """
 from __future__ import annotations
 
 import itertools
-import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 import numpy as np
 
 from .masks import get_mask, spectrum_curve
+from .time_model import (Window, active_at, describe_schedule,
+                         schedules_overlap)
 from .units import dbm_to_watt, total_power_watt, watt_to_dbm
 
 Polarization = Literal["H", "V", "LHCP", "RHCP"]
@@ -40,6 +49,8 @@ class Carrier:
     power_dbm: float
     polarization: str
     mask_name: str
+    # 每日激活区间；空 tuple = 始终激活
+    windows: tuple[Window, ...] = field(default_factory=tuple)
 
     @property
     def low(self) -> float:
@@ -48,6 +59,16 @@ class Carrier:
     @property
     def high(self) -> float:
         return self.center_mhz + self.bandwidth_mhz / 2.0
+
+    @property
+    def always_active(self) -> bool:
+        return not self.windows
+
+    def is_active_at(self, dt: datetime) -> bool:
+        return active_at(self.windows, dt)
+
+    def overlaps_schedule_of(self, other: "Carrier") -> bool:
+        return schedules_overlap(self.windows, other.windows)
 
 
 @dataclass
@@ -105,11 +126,64 @@ def _finding(ftype: str, severity: str, a: Carrier, b: Carrier,
     return out
 
 
-def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
-    """对整组载波做冲突检查与功率汇总。"""
-    findings: list[dict] = []
+def _time_context(carriers: list[Carrier], at: Optional[datetime]) -> dict:
+    """组装响应里的时间口径说明（前端图表/结论按它展示时刻）。"""
+    if at is not None:
+        active_names = [c.name for c in carriers if c.is_active_at(at)]
+        return {
+            "scope": "instant",
+            "at_utc": at.astimezone(timezone.utc).isoformat(),
+            "active_carriers": active_names,
+            "inactive_carriers": [c.name for c in carriers if c.name not in active_names],
+        }
+    return {
+        "scope": "anytime",
+        "at_utc": None,
+        "active_carriers": [c.name for c in carriers],
+        "inactive_carriers": [],
+    }
 
+
+def _eligible_pairs(carriers: list[Carrier], at: Optional[datetime]):
+    """产出需要检查的载波对及其时间关系。
+
+    instant 口径：双方在 at 时刻都激活；
+    anytime 口径：双方在一天循环内存在共同激活时刻。
+    返回 (a, b, time_separated)；time_separated=True 的对只登记、不检查冲突。
+    """
     for a, b in itertools.combinations(carriers, 2):
+        if at is not None:
+            if a.is_active_at(at) and b.is_active_at(at):
+                yield a, b, False
+        elif a.overlaps_schedule_of(b):
+            yield a, b, False
+        else:
+            yield a, b, True
+
+
+def analyze(carriers: list[Carrier], rules: AnalysisRules,
+            at: Optional[datetime] = None) -> dict:
+    """对整组载波做冲突检查与功率汇总。
+
+    at 为带时区的时刻时，只检查该时刻同时激活的载波（功率汇总也只算它们）；
+    at 为 None 时按全天口径，时间完全不重叠的载波对不计任何冲突。
+    """
+    findings: list[dict] = []
+    time_separated_pairs: list[dict] = []
+    evaluated: list[Carrier] = []
+
+    for a, b, time_separated in _eligible_pairs(carriers, at):
+        if at is None and time_separated:
+            # 频率可能相同，但排程一天内互不重合 -> 不可能互相干扰，登记后放行
+            time_separated_pairs.append({
+                "carrier_a": a.name, "carrier_b": b.name,
+                "schedule_a": describe_schedule(a.windows),
+                "schedule_b": describe_schedule(b.windows),
+            })
+            continue
+
+        evaluated.extend(x for x in (a, b) if x not in evaluated)
+
         # 边缘净距：频带不相交时 >0（净空），相切时 0，重叠时 <0
         gap = max(a.low, b.low) - min(a.high, b.high)
         overlap = max(0.0, -gap)
@@ -172,17 +246,24 @@ def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
                         polarization_pair=pol_key, reuse_policy=policy,
                         direction=f"{tx.name}->{victim.name}"))
 
-    # ---- 功率汇总：线性域求和 ----
+    # ---- 功率汇总：线性域求和。instant 口径只汇总此刻激活的载波 ----
+    if at is not None:
+        summed = [c for c in carriers if c.is_active_at(at)]
+    else:
+        summed = list(carriers)
     per_carrier = [
-        {"name": c.name, "power_dbm": c.power_dbm, "power_w": dbm_to_watt(c.power_dbm)}
+        {"name": c.name, "power_dbm": c.power_dbm, "power_w": dbm_to_watt(c.power_dbm),
+         "active": c.is_active_at(at) if at is not None else True}
         for c in carriers
     ]
-    powers_dbm = [c.power_dbm for c in carriers]
+    powers_dbm = [c.power_dbm for c in summed]
     total_w = total_power_watt(powers_dbm)
     summary = {
         "carrier_count": len(carriers),
+        "active_carrier_count": len(summed),
         "total_power_w": total_w,
-        "total_power_dbm": watt_to_dbm(total_w),
+        # 无激活载波时不输出 -inf（不是合法 JSON），用 None 表示“此刻无功率”
+        "total_power_dbm": watt_to_dbm(total_w) if summed and total_w > 0 else None,
         # 仅供教学对比：直接对 dBm 求和是常见错误做法
         "naive_dbm_sum": round(sum(powers_dbm), 3) if powers_dbm else None,
         "per_carrier": per_carrier,
@@ -194,6 +275,8 @@ def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
 
     return {
         "findings": findings,
+        "time_separated_pairs": time_separated_pairs,
+        "time_context": _time_context(carriers, at),
         "power_summary": summary,
         "counts": counts,
         "status": "conflict" if counts["error"] else ("attention" if (counts["warning"] or counts["pending"]) else "ok"),

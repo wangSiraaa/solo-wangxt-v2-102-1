@@ -7,8 +7,23 @@ from sqlalchemy.pool import StaticPool
 
 from app import main
 from app.db import Base, CarrierRow, MaskRow, Scenario
+from app.revisions import scenario_fingerprint
+from app.schemas import ScenarioIn
 from app.seed import DEMO_CARRIERS, DEMO_POLICY
 from app.services.masks import MASKS
+
+
+def _demo_scenario():
+    req = ScenarioIn(name="教学演示场景", description="t", band_low_mhz=80,
+                     band_high_mhz=220, guard_required_mhz=1.0,
+                     leakage_limit_dbm=-45.0, reuse_policy=DEMO_POLICY,
+                     carriers=[{k: v for k, v in kw.items() if k != "position"}
+                               for kw in DEMO_CARRIERS])
+    return Scenario(name="教学演示场景", description="t", band_low_mhz=80,
+                    band_high_mhz=220, guard_required_mhz=1.0,
+                    leakage_limit_dbm=-45.0, reuse_policy=DEMO_POLICY,
+                    revision=1, fingerprint=scenario_fingerprint(req),
+                    carriers=[CarrierRow(**kw) for kw in DEMO_CARRIERS])
 
 
 @pytest.fixture()
@@ -23,11 +38,7 @@ def client(monkeypatch):
         for m in MASKS.values():
             s.add(MaskRow(name=m.name, points=[list(p) for p in m.points],
                           span_mhz=m.span_mhz, description=m.description))
-        sc = Scenario(name="教学演示场景", description="t", band_low_mhz=80,
-                      band_high_mhz=220, guard_required_mhz=1.0,
-                      leakage_limit_dbm=-45.0, reuse_policy=DEMO_POLICY,
-                      carriers=[CarrierRow(**kw) for kw in DEMO_CARRIERS])
-        s.add(sc)
+        s.add(_demo_scenario())
         s.commit()
     monkeypatch.setattr(main, "engine", engine)
     with TestClient(main.app) as c:

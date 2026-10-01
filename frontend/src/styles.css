@@ -147,3 +147,59 @@ label.field-label { color: var(--muted); font-size: 12px; }
 .err-msg { color: var(--error); font-size: 12px; margin-top: 6px; }
 .muted { color: var(--muted); }
 .plot-note { font-size: 11px; color: var(--muted); margin: 2px 0 8px; }
+
+/* ---- 激活区间 / 时间口径 ---- */
+table.carriers td .sched-toggle {
+  font-size: 11px; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; padding: 2px 6px;
+}
+table.carriers td .sched-toggle.has { border-color: var(--accent); color: var(--accent); }
+table.carriers td .sched-toggle.cross { border-color: var(--warning); color: var(--warning); }
+tr.sched-open td { background: rgba(77,163,255,.06); }
+tr.sched-edit-row td { background: var(--panel-2); padding: 8px 10px; }
+.sched-edit-head { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+.sched .sched-row {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 5px;
+}
+.sched .time-input { width: 78px !important; }
+.sched .tz-select { width: 118px; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; font-size: 12px; }
+.sched-row.cross .time-input { border-color: var(--warning); }
+.cross-tag {
+  font-size: 10px; color: var(--warning); border: 1px solid var(--warning);
+  border-radius: 8px; padding: 0 6px;
+}
+.sched-del { padding: 2px 8px !important; }
+.sched-empty { display: flex; gap: 8px; align-items: center; }
+.active-lists { margin-top: 8px; font-size: 11px; display: grid; gap: 3px; }
+.active-now { color: var(--ok); }
+.time-context {
+  font-size: 11px; padding: 5px 8px; border-radius: 5px; margin-bottom: 8px;
+  background: rgba(77,163,255,.1); border-left: 3px solid var(--accent);
+}
+.findings li.time-separated {
+  border-left-color: var(--muted); background: rgba(133,149,163,.08);
+}
+.findings li.time-separated .ok-tag {
+  font-size: 10px; padding: 0 6px; border-radius: 8px; margin-right: 6px;
+  border: 1px solid var(--ok); color: var(--ok);
+}
+
+/* ---- 已保存规划 ---- */
+table.saved-plans { margin-top: 8px; }
+tr.stale-row { opacity: .85; }
+tr.stale-row td { background: rgba(255,93,93,.05); }
+.stale-pill {
+  font-size: 10px; font-weight: 700; color: var(--error);
+  border: 1px solid var(--error); border-radius: 8px; padding: 1px 8px;
+}
+.fresh-pill {
+  font-size: 10px; font-weight: 700; color: var(--ok);
+  border: 1px solid var(--ok); border-radius: 8px; padding: 1px 8px;
+}
+.stale-tag {
+  font-size: 10px; color: var(--error); margin-left: 6px;
+}
+.stale-reason { color: var(--error); font-size: 10px; margin-top: 2px; max-width: 280px; }
+.saved-actions { display: flex; gap: 4px; white-space: nowrap; }
+.saved-actions button { padding: 2px 8px; font-size: 11px; }

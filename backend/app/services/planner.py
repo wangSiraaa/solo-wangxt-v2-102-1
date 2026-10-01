@@ -9,6 +9,9 @@
 - guard_only 模式：统一使用规则中的保护间隔。
 - mask_aware 模式：每对载波的间隔按双方掩模尾部泄漏都不越限来反算
   （功率/掩模不同 => 两个方向阈值不同）。
+- 时间口径：只有在一天循环中存在共同激活时刻的载波对才需要频率隔离；
+  排程互不重合（含跨午夜、不同 UTC 偏移）的载波对可同频，不加约束。
+  传入 at（aware datetime）时进一步只约束该时刻同时激活的载波对。
 
 目标：最小化各载波相对其偏好位置（录入中心频率，截断到可用频段内）的偏移量。
 
@@ -17,11 +20,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
 
 import numpy as np
 
 from .analysis import Carrier, AnalysisRules
 from .masks import get_mask
+from .time_model import describe_schedule, format_hhmm
 from .units import dbm_to_watt, watt_to_dbm
 
 GRID_KHZ = 1  # 频率规划网格：1 kHz
@@ -89,8 +95,13 @@ def _safe_edge_gap(a: Carrier, b: Carrier, rules: AnalysisRules) -> float:
 
 
 def plan(carriers: list[Carrier], rules: AnalysisRules,
-         band: BandLimits, mode: str = "guard_only") -> dict:
-    """用 CP-SAT 求一组可行频率位置。"""
+         band: BandLimits, mode: str = "guard_only",
+         at: Optional[datetime] = None) -> dict:
+    """用 CP-SAT 求一组可行频率位置。
+
+    at=None：全天口径，只要排程在一天内有共同激活时刻的载波对就加间隔约束；
+    at=<aware datetime>：只约束该时刻同时激活的载波对。
+    """
     from ortools.sat.python import cp_model
 
     model = cp_model.CpModel()
@@ -116,6 +127,22 @@ def plan(carriers: list[Carrier], rules: AnalysisRules,
     for i in range(n):
         for j in range(i + 1, n):
             a, b = carriers[i], carriers[j]
+
+            # ---- 时间口径：该时刻/当天完全不会同时激活的载波对无需频率隔离 ----
+            if at is not None:
+                coactive = a.is_active_at(at) and b.is_active_at(at)
+            else:
+                coactive = a.overlaps_schedule_of(b)
+            if not coactive:
+                pair_info.append({
+                    "a": a.name, "b": b.name,
+                    "constraint": "time-separated (schedules never overlap)",
+                    "required_edge_mhz": 0.0,
+                    "schedule_a": describe_schedule(a.windows),
+                    "schedule_b": describe_schedule(b.windows),
+                })
+                continue
+
             same_pol = a.polarization == b.polarization
             # 同极化无极化隔离，按禁止同频处理；异极化查输入规则
             policy = "forbidden" if same_pol else rules.policy_for(a.polarization, b.polarization)
@@ -163,6 +190,7 @@ def plan(carriers: list[Carrier], rules: AnalysisRules,
             "assignments": [],
             "pair_constraints": pair_info,
             "mode": mode,
+            "time_scope": ("instant" if at is not None else "anytime"),
         }
 
     assignments = []
@@ -178,6 +206,13 @@ def plan(carriers: list[Carrier], rules: AnalysisRules,
             "power_dbm": c.power_dbm,
             "polarization": c.polarization,
             "mask_name": c.mask_name,
+            "schedule": [
+                {"start": format_hhmm(w.start_min),
+                 "end": "24:00" if w.end_min == 1440 else format_hhmm(w.end_min),
+                 "tz_offset_minutes": w.tz_offset_minutes}
+                for w in c.windows
+            ],
+            "always_active": c.always_active,
             "shift_mhz": round(new_center - c.center_mhz, 4),
         })
 
@@ -186,6 +221,7 @@ def plan(carriers: list[Carrier], rules: AnalysisRules,
         "feasible": True,
         "status": solver.status_name(status),
         "mode": mode,
+        "time_scope": ("instant" if at is not None else "anytime"),
         "objective_khz": solver.objective_value * GRID_KHZ,
         "assignments": assignments,
         "pair_constraints": pair_info,

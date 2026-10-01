@@ -33,4 +33,13 @@ export const api = {
     request('/analyze', { method: 'POST', body: JSON.stringify(payload) }),
   plan: (payload) =>
     request('/plan', { method: 'POST', body: JSON.stringify(payload) }),
+  listPlans: (scenarioId) =>
+    request(scenarioId != null ? `/plans?scenario_id=${scenarioId}` : '/plans'),
+  getPlan: (id) => request(`/plans/${id}`),
+  savePlan: (payload) =>
+    request('/plans', { method: 'POST', body: JSON.stringify(payload) }),
+  recheckPlan: (id) =>
+    request(`/plans/${id}/recheck`, { method: 'POST' }),
+  deletePlan: (id) =>
+    request(`/plans/${id}`, { method: 'DELETE' }),
 }
