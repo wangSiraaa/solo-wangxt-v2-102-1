@@ -147,3 +147,59 @@ label.field-label { color: var(--muted); font-size: 12px; }
 .err-msg { color: var(--error); font-size: 12px; margin-top: 6px; }
 .muted { color: var(--muted); }
 .plot-note { font-size: 11px; color: var(--muted); margin: 2px 0 8px; }
+
+/* ---- 时间口径 ---- */
+.badge-time {
+  font-size: 11px; color: var(--accent); border: 1px solid var(--accent);
+  border-radius: 10px; padding: 1px 9px;
+}
+.time-scope { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.rev-badge {
+  font-size: 10px; color: var(--pending); border: 1px solid var(--pending);
+  border-radius: 8px; padding: 0 6px; margin-left: 6px; text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ---- 载波激活时段编辑 ---- */
+.win-btn { font-size: 11px; padding: 2px 7px; }
+.win-btn.has { border-color: var(--accent); color: var(--accent); }
+.win-row-wrap td { background: rgba(77,163,255,0.05); }
+.win-editor { display: flex; flex-direction: column; gap: 5px; padding: 6px 4px; }
+.win-row { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; }
+.win-row input[type="time"], .win-row select {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px;
+  font-size: 11px; width: auto;
+}
+.tag-cross {
+  font-size: 10px; color: var(--warning); border: 1px solid var(--warning);
+  border-radius: 8px; padding: 0 6px; white-space: nowrap;
+}
+
+/* ---- 已保存规划 ---- */
+.saved-plans { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.saved-plan {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel-2); border-radius: 5px; padding: 3px 6px;
+  border-left: 3px solid var(--ok);
+}
+.saved-plan.expired { border-left-color: var(--muted); opacity: 0.85; }
+.link-btn {
+  background: none; border: none; padding: 2px 4px; text-align: left; flex: 1;
+  color: var(--text); cursor: pointer;
+}
+.link-btn:disabled { color: var(--muted); cursor: not-allowed; text-decoration: line-through; }
+button.tiny { padding: 1px 7px; font-size: 11px; }
+.plan-ok { font-size: 10px; color: var(--ok); border: 1px solid var(--ok); border-radius: 8px; padding: 0 6px; }
+.plan-stale {
+  font-size: 10px; color: var(--error); border: 1px solid var(--error);
+  border-radius: 8px; padding: 0 6px;
+}
+
+/* ---- 规划结果表内时段 ---- */
+.win-cell { text-align: left !important; }
+.win-chip {
+  display: inline-block; font-size: 10px; margin: 1px 3px 1px 0;
+  border: 1px solid var(--border); border-radius: 8px; padding: 0 6px;
+  color: var(--muted); white-space: nowrap;
+}

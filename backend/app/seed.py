@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from .config import DATABASE_URL
 from .db import Base, CarrierRow, MaskRow, Scenario
+from .migrations import run_migrations
 from .services.masks import MASKS
 
 DEMO_POLICY = {
@@ -14,7 +15,8 @@ DEMO_POLICY = {
     "H|RHCP": "forbidden",
 }
 
-# 所有载波带宽相同 (4 MHz)、功率不同；分别制造保护带不足、尾部越界与重叠
+# 所有载波带宽相同 (4 MHz)、功率不同；分别制造保护带不足、尾部越界与重叠。
+# 该场景是“无时间数据”的历史场景：windows 缺省 -> 始终激活，历史分析结论不变。
 DEMO_CARRIERS = [
     # 保护带不足(0.5 MHz) + 双向掩模尾部越界，且因功率不同两个方向泄漏量不同
     dict(name="C1", position=0, center_mhz=100.0, bandwidth_mhz=4.0,
@@ -49,9 +51,28 @@ DEMO_CARRIERS = [
          power_dbm=20.0, polarization="V", mask_name="strict"),
 ]
 
+# 时间感知教学场景：同频载波按班次错开发射；全部 UTC+8 本地时间录入。
+# T1 白班(08:00–18:00) / T2 夜班(18:00–次日08:00，跨午夜)：同频 120 MHz 但不重叠 -> 无冲突。
+# T3 22:00–02:00 与 T2 在 22:00–02:00 同时激活且同频同极化 -> 重叠冲突。
+# T4(12:00–14:00, 134.5 MHz) 与白班 T1(130 MHz) 同时激活：保护带不足 + loose 单向尾部越界。
+TIME_DEMO_CARRIERS = [
+    dict(name="T1", position=0, center_mhz=120.0, bandwidth_mhz=4.0,
+         power_dbm=30.0, polarization="H", mask_name="strict",
+         windows=[{"start": "08:00", "end": "18:00", "tz_offset_minutes": 480}]),
+    dict(name="T2", position=1, center_mhz=120.0, bandwidth_mhz=4.0,
+         power_dbm=20.0, polarization="H", mask_name="strict",
+         windows=[{"start": "18:00", "end": "08:00", "tz_offset_minutes": 480}]),
+    dict(name="T3", position=2, center_mhz=120.0, bandwidth_mhz=4.0,
+         power_dbm=20.0, polarization="H", mask_name="strict",
+         windows=[{"start": "22:00", "end": "02:00", "tz_offset_minutes": 480}]),
+    dict(name="T4", position=3, center_mhz=134.5, bandwidth_mhz=4.0,
+         power_dbm=25.0, polarization="H", mask_name="loose",
+         windows=[{"start": "12:00", "end": "14:00", "tz_offset_minutes": 480}]),
+]
+
 
 def seed(engine) -> None:
-    Base.metadata.create_all(engine)
+    run_migrations(engine)
     with Session(engine) as s:
         for m in MASKS.values():
             row = s.scalar(select(MaskRow).where(MaskRow.name == m.name))
@@ -64,13 +85,27 @@ def seed(engine) -> None:
             sc = Scenario(
                 name="教学演示场景",
                 description="同带宽不同功率：保护带不足、掩模尾部越界（方向性）、"
-                            "频带重叠、极化复用待评估/允许，全部冲突可定位到载波对。",
+                            "频带重叠、极化复用待评估/允许，全部冲突可定位到载波对。"
+                            "无时间区间数据，按“始终激活”处理。",
                 band_low_mhz=80.0, band_high_mhz=220.0,
                 guard_required_mhz=1.0, leakage_limit_dbm=-45.0,
                 reuse_policy=DEMO_POLICY,
             )
-            sc.carriers = [CarrierRow(**kw) for kw in DEMO_CARRIERS]
+            sc.carriers = [CarrierRow(windows=[], **kw) for kw in DEMO_CARRIERS]
             s.add(sc)
+
+        existing_t = s.scalar(select(Scenario).where(Scenario.name == "时段干扰演示场景"))
+        if existing_t is None:
+            sct = Scenario(
+                name="时段干扰演示场景",
+                description="同频载波按班次错开发射（UTC+8，含跨午夜区间）：时间不重叠"
+                            "不报几何/泄漏冲突；时段重合时沿用极化、保护带与双向掩模口径。",
+                band_low_mhz=80.0, band_high_mhz=220.0,
+                guard_required_mhz=1.0, leakage_limit_dbm=-45.0,
+                reuse_policy=DEMO_POLICY,
+            )
+            sct.carriers = [CarrierRow(**kw) for kw in TIME_DEMO_CARRIERS]
+            s.add(sct)
         s.commit()
 
 

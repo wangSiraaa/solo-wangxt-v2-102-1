@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import itertools
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 import numpy as np
 
 from .masks import get_mask, spectrum_curve
+from .timewindows import (DAY_MIN, TimeWindow, active_at, coactive,
+                          describe_window, fmt_hhmm, shared_utc_segments)
 from .units import dbm_to_watt, total_power_watt, watt_to_dbm
 
 Polarization = Literal["H", "V", "LHCP", "RHCP"]
@@ -40,6 +42,8 @@ class Carrier:
     power_dbm: float
     polarization: str
     mask_name: str
+    # 每日重复的激活区间（本地墙钟 + 显式 UTC 偏移）；空 = 始终激活（旧数据默认）
+    windows: list[TimeWindow] = field(default_factory=list)
 
     @property
     def low(self) -> float:
@@ -48,6 +52,10 @@ class Carrier:
     @property
     def high(self) -> float:
         return self.center_mhz + self.bandwidth_mhz / 2.0
+
+    @property
+    def always_active(self) -> bool:
+        return not self.windows
 
 
 @dataclass
@@ -93,7 +101,7 @@ def leakage_power_dbm(tx: Carrier, victim: Carrier,
 
 
 def _finding(ftype: str, severity: str, a: Carrier, b: Carrier,
-             message: str, **metrics) -> dict:
+             message: str, time_note: Optional[dict] = None, **metrics) -> dict:
     out = {
         "type": ftype,
         "severity": severity,
@@ -101,15 +109,70 @@ def _finding(ftype: str, severity: str, a: Carrier, b: Carrier,
         "carrier_b": b.name,
         "message": message,
     }
+    if time_note is not None:
+        out["time_scope"] = time_note
     out.update(metrics)
     return out
 
 
-def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
-    """对整组载波做冲突检查与功率汇总。"""
+def _pair_time_note(a: Carrier, b: Carrier,
+                    shared: list[tuple[int, int]]) -> dict:
+    """findings 上附带的时间口径：两载波同时激活的 UTC 时段。"""
+    return {
+        "mode": "all_day",
+        "carrier_a_windows": [describe_window(w) for w in a.windows],
+        "carrier_b_windows": [describe_window(w) for w in b.windows],
+        "a_always_active": a.always_active,
+        "b_always_active": b.always_active,
+        "shared_utc": [
+            {"start": fmt_hhmm(lo), "end": fmt_hhmm(hi) if hi < DAY_MIN else "24:00",
+             "duration_min": hi - lo}
+            for lo, hi in shared
+        ],
+    }
+
+
+def analyze(carriers: list[Carrier], rules: AnalysisRules,
+            at_utc_minute: Optional[int] = None) -> dict:
+    """对整组载波做冲突检查与功率汇总。
+
+    时间口径：
+    - ``at_utc_minute`` 为 None（全天配对）：只对一天内存在同时激活时段的载波对
+      做几何/保护带/掩模检查；时间互不交叠的同频载波不构成任何冲突。
+    - ``at_utc_minute`` 给定时刻（UTC 当日分钟）：只统计该时刻真正处于激活状态
+      的载波（频段图/谱图/功率汇总同口径），结论绑定到这一时刻。
+    """
+    if at_utc_minute is not None:
+        active_carriers = [c for c in carriers if active_at(c.windows, at_utc_minute)]
+    else:
+        active_carriers = list(carriers)
+    active_names = {c.name for c in active_carriers}
     findings: list[dict] = []
+    pair_reports: list[dict] = []
 
     for a, b in itertools.combinations(carriers, 2):
+        a_on = a.name in active_names
+        b_on = b.name in active_names
+        both_on = a_on and b_on
+        shared = shared_utc_segments(a.windows, b.windows)
+        overlapping_in_time = bool(shared)
+        pair_reports.append({
+            "carrier_a": a.name, "carrier_b": b.name,
+            "a_always_active": a.always_active, "b_always_active": b.always_active,
+            "a_active": a_on, "b_active": b_on,
+            "coactive": overlapping_in_time and (at_utc_minute is None or both_on),
+            "shared_utc": [
+                {"start": fmt_hhmm(lo), "end": fmt_hhmm(hi) if hi < DAY_MIN else "24:00",
+                 "duration_min": hi - lo}
+                for lo, hi in shared
+            ],
+            "carrier_a_windows": [describe_window(w) for w in a.windows],
+            "carrier_b_windows": [describe_window(w) for w in b.windows],
+        })
+        if not (overlapping_in_time and both_on):
+            # 时间不交叠（或该时刻未同时发射）：频率相同也不报几何/泄漏冲突
+            continue
+
         # 边缘净距：频带不相交时 >0（净空），相切时 0，重叠时 <0
         gap = max(a.low, b.low) - min(a.high, b.high)
         overlap = max(0.0, -gap)
@@ -117,6 +180,7 @@ def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
         # 同极化没有极化隔离可言，按禁止同频复用处理；异极化查输入规则
         policy: str = "forbidden" if same_pol else rules.policy_for(a.polarization, b.polarization)
         pol_key = "|".join(sorted((a.polarization, b.polarization)))
+        time_note = None if (a.always_active and b.always_active) else _pair_time_note(a, b, shared)
 
         # ---- 几何关系：重叠 / 保护带 ----
         if gap <= 0.0:
@@ -124,6 +188,7 @@ def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
                 findings.append(_finding(
                     "overlap", "error", a, b,
                     f"{a.name} 与 {b.name} 频带重叠 {overlap:.3f} MHz（同极化 {a.polarization}）",
+                    time_note=time_note,
                     gap_mhz=round(gap, 4), overlap_mhz=round(overlap, 4),
                     polarization_pair=pol_key, reuse_policy="forbidden"))
             elif policy == "forbidden":
@@ -131,6 +196,7 @@ def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
                     "overlap", "error", a, b,
                     f"{a.name} 与 {b.name} 频带重叠 {overlap:.3f} MHz，"
                     f"且极化 {a.polarization}/{b.polarization} 规则禁止同频复用",
+                    time_note=time_note,
                     gap_mhz=round(gap, 4), overlap_mhz=round(overlap, 4),
                     polarization_pair=pol_key, reuse_policy="forbidden"))
             elif policy == "unknown":
@@ -138,6 +204,7 @@ def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
                     "reuse_unknown", "pending", a, b,
                     f"{a.name} 与 {b.name} 同频段重叠 {overlap:.3f} MHz，"
                     f"极化 {a.polarization}/{b.polarization} 的隔离度未知，复用待评估",
+                    time_note=time_note,
                     gap_mhz=round(gap, 4), overlap_mhz=round(overlap, 4),
                     polarization_pair=pol_key, reuse_policy="unknown"))
             # policy == "allowed"：已知隔离度足够，允许复用，不报冲突
@@ -149,6 +216,7 @@ def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
                     f"< 要求保护间隔 {rules.guard_required_mhz:.3f} MHz"
                     + ("" if same_pol else f"（极化 {a.polarization}/{b.polarization}，"
                        f"复用规则: {policy}）"),
+                    time_note=time_note,
                     gap_mhz=round(gap, 4),
                     required_mhz=rules.guard_required_mhz,
                     deficit_mhz=round(rules.guard_required_mhz - gap, 4),
@@ -166,23 +234,30 @@ def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
                         "mask_tail", "error", tx, victim,
                         f"{tx.name} 的掩模尾部泄漏到 {victim.name} 频带内 "
                         f"{leak:.1f} dBm，超过限值 {rules.leakage_limit_dbm:.1f} dBm",
+                        time_note=time_note,
                         leakage_dbm=round(leak, 2),
                         limit_dbm=rules.leakage_limit_dbm,
                         excess_dbm=round(leak - rules.leakage_limit_dbm, 2),
                         polarization_pair=pol_key, reuse_policy=policy,
                         direction=f"{tx.name}->{victim.name}"))
 
-    # ---- 功率汇总：线性域求和 ----
+    # ---- 功率汇总：线性域求和。时刻口径只统计当时激活的载波 ----
+    counted = active_carriers
     per_carrier = [
-        {"name": c.name, "power_dbm": c.power_dbm, "power_w": dbm_to_watt(c.power_dbm)}
+        {"name": c.name, "power_dbm": c.power_dbm, "power_w": dbm_to_watt(c.power_dbm),
+         "active": c.name in active_names, "always_active": c.always_active}
         for c in carriers
     ]
-    powers_dbm = [c.power_dbm for c in carriers]
+    powers_dbm = [c.power_dbm for c in counted]
     total_w = total_power_watt(powers_dbm)
     summary = {
-        "carrier_count": len(carriers),
+        "carrier_count": len(counted),
+        "carrier_count_total": len(carriers),
+        "active_names": sorted(active_names),
+        "inactive_names": sorted(c.name for c in carriers if c.name not in active_names),
         "total_power_w": total_w,
-        "total_power_dbm": watt_to_dbm(total_w),
+        # 该时刻无激活载波时总功率为 null（避免输出非标准 JSON 的 -Infinity）
+        "total_power_dbm": watt_to_dbm(total_w) if total_w > 0 else None,
         # 仅供教学对比：直接对 dBm 求和是常见错误做法
         "naive_dbm_sum": round(sum(powers_dbm), 3) if powers_dbm else None,
         "per_carrier": per_carrier,
@@ -192,9 +267,23 @@ def analyze(carriers: list[Carrier], rules: AnalysisRules) -> dict:
     for f in findings:
         counts[f["severity"]] = counts.get(f["severity"], 0) + 1
 
+    time_report = {
+        "mode": "instant" if at_utc_minute is not None else "all_day",
+        "at_utc_minute": None if at_utc_minute is None else at_utc_minute % DAY_MIN,
+        "at_utc_label": None if at_utc_minute is None else fmt_hhmm(at_utc_minute),
+        "carriers": [
+            {"name": c.name, "always_active": c.always_active,
+             "windows": [describe_window(w) for w in c.windows],
+             "active": c.name in active_names}
+            for c in carriers
+        ],
+        "pairs": pair_reports,
+    }
+
     return {
         "findings": findings,
         "power_summary": summary,
         "counts": counts,
+        "time_report": time_report,
         "status": "conflict" if counts["error"] else ("attention" if (counts["warning"] or counts["pending"]) else "ok"),
     }

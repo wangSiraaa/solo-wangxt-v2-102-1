@@ -27,6 +27,11 @@ export default function FindingsList({ findings, selectedPair, onSelect }) {
         if (f.polarization_pair) {
           meta.push(`极化对 ${f.polarization_pair}（规则: ${f.reuse_policy}）`)
         }
+        if (f.time_scope) {
+          const times = f.time_scope.shared_utc
+            .map((s) => `UTC ${s.start}–${s.end}（${s.duration_min} 分钟）`).join('、')
+          meta.push(`同时激活时段：${times}`)
+        }
         return (
           <li key={i} className={`${f.severity} ${selKey === key ? 'flash' : ''}`}
               onClick={() => onSelect([f.carrier_a, f.carrier_b])}>

@@ -22,6 +22,7 @@ import numpy as np
 
 from .analysis import Carrier, AnalysisRules
 from .masks import get_mask
+from .timewindows import active_at, coactive, describe_window
 from .units import dbm_to_watt, watt_to_dbm
 
 GRID_KHZ = 1  # 频率规划网格：1 kHz
@@ -89,9 +90,22 @@ def _safe_edge_gap(a: Carrier, b: Carrier, rules: AnalysisRules) -> float:
 
 
 def plan(carriers: list[Carrier], rules: AnalysisRules,
-         band: BandLimits, mode: str = "guard_only") -> dict:
-    """用 CP-SAT 求一组可行频率位置。"""
+         band: BandLimits, mode: str = "guard_only",
+         at_utc_minute: int | None = None) -> dict:
+    """用 CP-SAT 求一组可行频率位置。
+
+    时间口径与分析一致：
+    - 全天配对（``at_utc_minute=None``）：仅对一天内存在同时激活时段的载波对加
+      间隔/掩模约束；时间互不交叠的载波对可安全同频（“time-disjoint reuse”）。
+    - 指定时刻：只规划该时刻真正激活的载波，未激活载波原样列入 inactive_carriers。
+    """
     from ortools.sat.python import cp_model
+
+    if at_utc_minute is not None:
+        inactive_carriers = [c for c in carriers if not active_at(c.windows, at_utc_minute)]
+        carriers = [c for c in carriers if active_at(c.windows, at_utc_minute)]
+    else:
+        inactive_carriers = []
 
     model = cp_model.CpModel()
     n = len(carriers)
@@ -119,6 +133,13 @@ def plan(carriers: list[Carrier], rules: AnalysisRules,
             same_pol = a.polarization == b.polarization
             # 同极化无极化隔离，按禁止同频处理；异极化查输入规则
             policy = "forbidden" if same_pol else rules.policy_for(a.polarization, b.polarization)
+            # 时间互不交叠：该对从不同时发射，任何频率关系都不构成干扰 -> 可同频
+            if not coactive(a.windows, b.windows):
+                pair_info.append({"a": a.name, "b": b.name,
+                                  "constraint": "time-disjoint reuse",
+                                  "required_edge_mhz": 0.0,
+                                  "reuse_policy": policy})
+                continue
             if policy == "allowed":
                 pair_info.append({"a": a.name, "b": b.name, "constraint": "co-channel allowed",
                                   "required_edge_mhz": 0.0})
@@ -150,6 +171,22 @@ def plan(carriers: list[Carrier], rules: AnalysisRules,
 
     model.minimize(sum(deviation.values()))
 
+    if n == 0:
+        return {
+            "feasible": True,
+            "status": "OPTIMAL",
+            "mode": mode,
+            "objective_khz": 0.0,
+            "assignments": [],
+            "pair_constraints": pair_info,
+            "occupied_span_mhz": 0.0,
+            "band_limits_mhz": [band.low_mhz, band.high_mhz],
+            "inactive_carriers": [
+                {"name": c.name, "windows": [describe_window(w) for w in c.windows]}
+                for c in inactive_carriers],
+            "message": "该时刻没有处于激活状态的载波。",
+        }
+
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 10.0
     solver.parameters.num_search_workers = 4
@@ -163,6 +200,9 @@ def plan(carriers: list[Carrier], rules: AnalysisRules,
             "assignments": [],
             "pair_constraints": pair_info,
             "mode": mode,
+            "inactive_carriers": [
+                {"name": c.name, "windows": [describe_window(w) for w in c.windows]}
+                for c in inactive_carriers],
         }
 
     assignments = []
@@ -178,6 +218,7 @@ def plan(carriers: list[Carrier], rules: AnalysisRules,
             "power_dbm": c.power_dbm,
             "polarization": c.polarization,
             "mask_name": c.mask_name,
+            "windows": [describe_window(w) for w in c.windows],
             "shift_mhz": round(new_center - c.center_mhz, 4),
         })
 
@@ -191,6 +232,9 @@ def plan(carriers: list[Carrier], rules: AnalysisRules,
         "pair_constraints": pair_info,
         "occupied_span_mhz": round(max(h for _, h in used) - min(l for l, _ in used), 4),
         "band_limits_mhz": [band.low_mhz, band.high_mhz],
-        "message": f"已找到可行频率位置（共 {n} 个载波，目标偏移 "
+        "inactive_carriers": [
+            {"name": c.name, "windows": [describe_window(w) for w in c.windows]}
+            for c in inactive_carriers],
+        "message": f"已找到可行频率位置（共 {n} 个激活载波，目标偏移 "
                    f"{solver.objective_value * GRID_KHZ:.0f} kHz）。",
     }

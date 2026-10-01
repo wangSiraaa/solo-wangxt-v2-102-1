@@ -11,12 +11,14 @@ export default function SpectrumChart({ spectrum, bands, showCarriers = true }) 
     const traces = []
     if (showCarriers) {
       for (const c of curves) {
+        const inactive = c.active === false
         traces.push({
           x: f, y: c.psd_dbm_hz,
           mode: 'lines', type: 'scattergl',
-          name: `${c.name} (${c.polarization}, ${c.mask_name})`,
-          line: { color: POL_COLOR[c.polarization] || '#8595a3', width: 1 },
-          opacity: 0.55,
+          name: `${c.name}${inactive ? ' ⏸未激活' : ''} (${c.polarization}, ${c.mask_name})`,
+          line: { color: POL_COLOR[c.polarization] || '#8595a3',
+                  width: 1, dash: inactive ? 'dot' : 'solid' },
+          opacity: inactive ? 0.18 : 0.55,
           connectgaps: false,
           hovertemplate: `${c.name} %{x:.2f} MHz<br>%{y:.1f} dBm/Hz<extra></extra>`,
         })
@@ -38,7 +40,8 @@ export default function SpectrumChart({ spectrum, bands, showCarriers = true }) 
   const shapes = useMemo(() => (bands || []).map((b) => ({
     type: 'rect', x0: b.low_mhz, x1: b.high_mhz, y0: 0, y1: 1, yref: 'paper',
     fillcolor: POL_COLOR[b.polarization] || '#888',
-    opacity: 0.06, line: { width: 0 },
+    opacity: b.active === false ? 0.02 : 0.06,
+    line: { width: 0 },
   })), [bands])
 
   const layout = {

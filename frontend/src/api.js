@@ -9,11 +9,15 @@ async function request(path, options = {}) {
     let detail = res.statusText
     try {
       const body = await res.json()
-      detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
+      if (typeof body.detail === 'string') detail = body.detail
+      else if (body.detail?.message) detail = body.detail.message
+      else detail = JSON.stringify(body.detail)
     } catch {
       /* ignore */
     }
-    throw new Error(detail)
+    const err = new Error(detail)
+    err.status = res.status
+    throw err
   }
   return res.json()
 }
@@ -33,4 +37,13 @@ export const api = {
     request('/analyze', { method: 'POST', body: JSON.stringify(payload) }),
   plan: (payload) =>
     request('/plan', { method: 'POST', body: JSON.stringify(payload) }),
+  // 已保存规划（绑定场景修订 + 时间窗口）
+  listPlans: (scenarioId) => request(`/scenarios/${scenarioId}/plans`),
+  savePlan: (scenarioId, payload) =>
+    request(`/scenarios/${scenarioId}/plans`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  getPlan: (id) => request(`/plans/${id}`),
+  reusePlan: (id) => request(`/plans/${id}/reuse`, { method: 'POST' }),
+  deletePlan: (id) => request(`/plans/${id}`, { method: 'DELETE' }),
 }

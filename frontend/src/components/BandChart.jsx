@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import Plot from './Plot.jsx'
+import { describeCarrierWindows } from '../timeutils.js'
 
 const POLS = ['H', 'V', 'LHCP', 'RHCP']
 const Y_OF = { H: 4, V: 3, LHCP: 2, RHCP: 1 }
@@ -49,25 +50,32 @@ export default function BandChart({ bands, findings, selectedPair, plan, onPick 
 
   for (const b of bands || []) {
     const y = Y_OF[b.polarization] ?? 0.5
+    const inactive = b.active === false
     const s = sev[b.name] || 'ok'
     const isSel = selected.includes(b.name)
     shapes.push({
       type: 'rect', x0: b.low_mhz, x1: b.high_mhz,
       y0: y - BAR_H / 2, y1: y + BAR_H / 2,
-      fillcolor: SEV_COLOR[s] || SEV_COLOR.ok,
-      line: { color: isSel ? '#ffffff' : 'rgba(0,0,0,0.45)', width: isSel ? 2.5 : 1 },
+      fillcolor: inactive ? 'rgba(133,149,163,0.12)' : (SEV_COLOR[s] || SEV_COLOR.ok),
+      line: {
+        color: inactive ? 'rgba(133,149,163,0.55)' : (isSel ? '#ffffff' : 'rgba(0,0,0,0.45)'),
+        width: isSel ? 2.5 : 1,
+        dash: inactive ? 'dash' : 'solid',
+      },
     })
     // 中心刻度
     shapes.push({
       type: 'line', x0: b.center_mhz, x1: b.center_mhz,
       y0: y - BAR_H / 2, y1: y + BAR_H / 2,
-      line: { color: 'rgba(0,0,0,0.55)', width: 1 },
+      line: { color: inactive ? 'rgba(133,149,163,0.4)' : 'rgba(0,0,0,0.55)', width: 1 },
     })
     annotations.push({
       x: (b.low_mhz + b.high_mhz) / 2, y: y,
-      text: `<b>${b.name}</b><br>${b.power_dbm} dBm`,
-      showarrow: false, font: { size: 10, color: '#0b0f14' },
+      text: `<b>${b.name}</b>${inactive ? ' ⏸' : ''}<br>${b.power_dbm} dBm`,
+      showarrow: false,
+      font: { size: 10, color: inactive ? '#7d8a97' : '#0b0f14' },
       yanchor: 'middle',
+      opacity: inactive ? 0.7 : 1,
     })
   }
 
@@ -77,7 +85,7 @@ export default function BandChart({ bands, findings, selectedPair, plan, onPick 
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',
     font: { color: '#b8c4cf', size: 11 },
-    title: { text: '频段占用（彩色=录入频带及冲突；绿色描边=OR-Tools 规划位置）', font: { size: 12 } },
+    title: { text: '频段占用（彩色=录入频带及冲突；灰色虚线=该时刻未激活；绿色描边=OR-Tools 规划位置）', font: { size: 12 } },
     xaxis: { title: '频率 (MHz)', zeroline: false, gridcolor: 'rgba(255,255,255,0.06)' },
     yaxis: {
       tickvals: [1, 2, 3, 4], ticktext: ['RHCP', 'LHCP', 'V', 'H'],
@@ -94,7 +102,8 @@ export default function BandChart({ bands, findings, selectedPair, plan, onPick 
     y: (bands || []).map((b) => Y_OF[b.polarization] ?? 0.5),
     text: (bands || []).map((b) =>
       `${b.name} | ${b.low_mhz}–${b.high_mhz} MHz<br>中心 ${b.center_mhz} MHz, 带宽 ${b.bandwidth_mhz} MHz<br>` +
-      `${b.power_dbm} dBm, ${b.polarization}, 掩模 ${b.mask_name}`),
+      `${b.power_dbm} dBm, ${b.polarization}, 掩模 ${b.mask_name}<br>` +
+      `激活时段：${describeCarrierWindows(b.windows)}${b.active === false ? '<br><b>⏸ 该时刻未激活</b>' : ''}`),
     mode: 'markers',
     marker: { size: 26, color: 'rgba(0,0,0,0)' },
     hovertemplate: '%{text}<extra></extra>',
